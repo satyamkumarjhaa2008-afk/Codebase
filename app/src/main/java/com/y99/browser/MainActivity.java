@@ -33,7 +33,6 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 
 public class MainActivity extends Activity {
-
     private static final String TARGET = "https://y99.in/web/desktop/discover";
     private static final String TAG = "Y99Browser";
     private static final int BG = Color.parseColor("#0B0B10");
@@ -54,11 +53,10 @@ public class MainActivity extends Activity {
     private String watcherJs = "";
     private boolean failed, reached, netLost;
     private int autoTries;
-    private String lastState; // "connected" | "disconnected" | null
+    private String lastState;
 
     private final Runnable retry = () -> web.loadUrl(TARGET);
 
-    // ---- The ONLY thing this app logs: one line per real stranger transition.
     private synchronized void emit(String state) {
         if (state.equals(lastState)) return;
         lastState = state;
@@ -73,6 +71,11 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void state(String s) {
             if ("connected".equals(s) || "disconnected".equals(s)) emit(s);
+        }
+
+        @JavascriptInterface
+        public void event(String json) {
+            Log.i(TAG, "INSPECTOR " + json);
         }
     }
 
@@ -104,10 +107,9 @@ public class MainActivity extends Activity {
         overlayText = new TextView(this);
         overlayText.setTextColor(Color.LTGRAY);
         overlayText.setPadding(0, 32, 0, 0);
-        overlayText.setText("Loading Y99\u2026");
+        overlayText.setText("Loading Y99…");
         overlay.addView(overlayText);
         root.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
-
         setContentView(root);
 
         WebSettings s = web.getSettings();
@@ -124,23 +126,19 @@ public class MainActivity extends Activity {
         cookies.setAcceptThirdPartyCookies(web, true);
 
         web.addJavascriptInterface(new Bridge(), "Y99Native");
-
         web.setWebChromeClient(new WebChromeClient() {
-            @Override
-            public void onProgressChanged(WebView v, int p) {
+            @Override public void onProgressChanged(WebView v, int p) {
                 bar.setProgress(p);
                 bar.setVisibility(p >= 100 ? ViewGroup.GONE : ViewGroup.VISIBLE);
             }
-
-            @Override
-            public boolean onConsoleMessage(ConsoleMessage m) {
-                return true; // swallow page console output: keep logcat clean
+            @Override public boolean onConsoleMessage(ConsoleMessage m) {
+                Log.d(TAG, "CONSOLE " + m.message() + " @" + m.sourceId() + ":" + m.lineNumber());
+                return true;
             }
         });
 
         web.setWebViewClient(new WebViewClient() {
-            @Override
-            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+            @Override public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
                 if (!r.isForMainFrame()) return false;
                 Uri u = r.getUrl();
                 String scheme = u.getScheme();
@@ -148,47 +146,44 @@ public class MainActivity extends Activity {
                 if (scheme.equals("http") || scheme.equals("https")) {
                     String h = u.getHost();
                     if (h != null && (h.equals("y99.in") || h.endsWith(".y99.in"))) return false;
-                } else if (scheme.equals("about") || scheme.equals("data") || scheme.equals("blob")) {
-                    return false;
-                }
-                try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) { }
+                } else if (scheme.equals("about") || scheme.equals("data") || scheme.equals("blob")) return false;
+                try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) {}
                 return true;
             }
 
-            @Override
-            public void onPageStarted(WebView v, String url, android.graphics.Bitmap icon) {
+            @Override public void onPageStarted(WebView v, String url, android.graphics.Bitmap icon) {
                 failed = false;
                 ui.removeCallbacks(retry);
-                drop(); // a new document means any previous stranger is gone
+                drop();
+                Log.i(TAG, "PAGE_STARTED " + url);
             }
 
-            @Override
-            public void onPageFinished(WebView v, String url) {
+            @Override public void onPageFinished(WebView v, String url) {
                 if (failed) return;
-                v.evaluateJavascript(watcherJs, null);
+                v.evaluateJavascript(watcherJs, value -> Log.i(TAG, "WATCHER_INJECTED url=" + url));
                 if (!reached) {
-                    if (url != null && url.contains("/discover")) {
-                        reached = true;
-                    } else if (autoTries++ < 2) {
-                        v.loadUrl(TARGET); // got bounced elsewhere: go back to the chat page
-                        return;
-                    }
+                    if (url != null && url.contains("/discover")) reached = true;
+                    else if (autoTries++ < 2) { v.loadUrl(TARGET); return; }
                 }
                 hideOverlay();
             }
 
-            @Override
-            public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
-                if (r.isForMainFrame()) fail();
+            @Override public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                if (r.isForMainFrame()) {
+                    Log.e(TAG, "MAIN_FRAME_ERROR " + e.getErrorCode() + " " + e.getDescription() + " " + r.getUrl());
+                    fail();
+                }
             }
 
-            @Override
-            public void onReceivedHttpError(WebView v, WebResourceRequest r, WebResourceResponse e) {
-                if (r.isForMainFrame() && e.getStatusCode() >= 500) fail();
+            @Override public void onReceivedHttpError(WebView v, WebResourceRequest r, WebResourceResponse e) {
+                if (r.isForMainFrame()) {
+                    Log.e(TAG, "MAIN_FRAME_HTTP_ERROR " + e.getStatusCode() + " " + r.getUrl());
+                    if (e.getStatusCode() >= 500) fail();
+                }
             }
 
-            @Override
-            public boolean onRenderProcessGone(WebView v, RenderProcessGoneDetail d) {
+            @Override public boolean onRenderProcessGone(WebView v, RenderProcessGoneDetail d) {
+                Log.e(TAG, "RENDER_PROCESS_GONE didCrash=" + d.didCrash());
                 drop();
                 ui.post(MainActivity.this::recreate);
                 return true;
@@ -197,13 +192,15 @@ public class MainActivity extends Activity {
 
         cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         netCb = new ConnectivityManager.NetworkCallback() {
-            @Override public void onLost(Network n) { ui.post(() -> netLost = true); }
-
+            @Override public void onLost(Network n) {
+                ui.post(() -> { netLost = true; Log.w(TAG, "NETWORK_LOST"); });
+            }
             @Override public void onAvailable(Network n) {
                 ui.post(() -> {
+                    Log.i(TAG, "NETWORK_AVAILABLE");
                     if (!netLost) return;
                     netLost = false;
-                    showOverlay("Reconnecting\u2026");
+                    showOverlay("Reconnecting…");
                     drop();
                     ui.removeCallbacks(retry);
                     web.loadUrl(TARGET);
@@ -211,13 +208,12 @@ public class MainActivity extends Activity {
             }
         };
         cm.registerDefaultNetworkCallback(netCb);
-
         web.loadUrl(TARGET);
     }
 
     private void fail() {
         failed = true;
-        showOverlay("Reconnecting\u2026");
+        showOverlay("Reconnecting…");
         ui.removeCallbacks(retry);
         ui.postDelayed(retry, RETRY_MS);
     }
@@ -243,22 +239,21 @@ public class MainActivity extends Activity {
             while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             return out.toString("UTF-8");
         } catch (Exception e) {
+            Log.e(TAG, "ASSET_READ_FAILED " + name, e);
             return "";
         }
     }
 
     @SuppressWarnings("deprecation")
-    @Override
-    public void onBackPressed() {
+    @Override public void onBackPressed() {
         if (web.canGoBack()) web.goBack(); else super.onBackPressed();
     }
 
-    @Override
-    protected void onDestroy() {
+    @Override protected void onDestroy() {
         ui.removeCallbacksAndMessages(null);
-        try { cm.unregisterNetworkCallback(netCb); } catch (Exception ignored) { }
-        root.removeView(web);
-        web.destroy();
+        try { cm.unregisterNetworkCallback(netCb); } catch (Exception ignored) {}
+        if (root != null && web != null) root.removeView(web);
+        if (web != null) web.destroy();
         super.onDestroy();
     }
 }
